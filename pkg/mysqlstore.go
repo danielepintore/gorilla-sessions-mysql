@@ -55,10 +55,10 @@ func init() {
 // you need to ensure that the db connection has the parseTime flag set to true
 func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlStoreOption) (*MysqlStore, error) {
 	if db == nil {
-		return nil, errors.New("Cannot instantiate the store: db is nil")
+		return nil, FromError("NewMysqlStore", ErrDbConnectionIsNil)
 	}
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("Cannot instantiate the store: %s", err.Error())
+		return nil, FromError("NewMysqlStore", errors.Join(ErrDbPing, err))
 	}
 
 	store := &MysqlStore{
@@ -83,11 +83,11 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 	}
 
 	if err := store.createSessionTable(); err != nil {
-		return nil, fmt.Errorf("Cannot instantiate the store: %s", err.Error())
+		return nil, FromError("NewMysqlStore", errors.Join(ErrAddingSessionTable, err))
 	}
 
 	if err := store.prepareQueryStatements(); err != nil {
-		return nil, fmt.Errorf("Cannot instantiate the store: %s", err.Error())
+		return nil, FromError("NewMysqlStore", errors.Join(ErrFailedToPrepareStmt, err))
 	}
 
 	// Start cleanup goroutine if shouldCleanup is true
@@ -104,11 +104,11 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 // enable the driver to convert the colums TIMESTAMP and DATETIME in time.Time
 func NewMysqlStoreFromDsn(dsn string, tableName string, keys []KeyPair, opts ...MysqlStoreOption) (*MysqlStore, error) {
 	if !strings.Contains(dsn, "parseTime=true") {
-		return nil, errors.New("Cannot instantiate the store: parseTime needs to be true")
+		return nil, FromError("NewMysqlStoreFromDsn", ErrNoParseTimeParameter)
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("Cannot instantiate the store: %s", err.Error())
+		return nil, FromError("NewMysqlStoreFromDsn", errors.Join(ErrDbOpenConnection, err))
 	}
 	return NewMysqlStore(db, tableName, keys, opts...)
 }
@@ -192,27 +192,27 @@ func (store *MysqlStore) prepareQueryStatements() error {
 		store.tableName + " WHERE id = ?"
 	store.stmtSelect, err = store.db.Prepare(selectQuery)
 	if err != nil {
-		return err
+		return FromError("prepareQueryStatements->SELECT", err)
 	}
 
 	insertQuery := "INSERT INTO " + store.tableName +
 		"(id, sessionData, createdAt, modifiedAt, expiresAt) VALUES (NULL, ?, ?, ?, ?)"
 	store.stmtInsert, err = store.db.Prepare(insertQuery)
 	if err != nil {
-		return err
+		return FromError("prepareQueryStatements->INSERT", err)
 	}
 
 	deleteQuery := "DELETE FROM " + store.tableName + " WHERE id = ?"
 	store.stmtDelete, err = store.db.Prepare(deleteQuery)
 	if err != nil {
-		return err
+		return FromError("prepareQueryStatements->DELETE", err)
 	}
 
 	updateQuery := "UPDATE " + store.tableName +
 		" SET sessionData = ?, createdAt = ?, expiresAt = ? WHERE id = ?"
 	store.stmtUpdate, err = store.db.Prepare(updateQuery)
 	if err != nil {
-		return err
+		return FromError("prepareQueryStatements->UPDATE", err)
 	}
 
 	return nil
@@ -230,7 +230,7 @@ func (store *MysqlStore) createSessionTable() error {
 		);
 	`
 	if _, err := store.db.Exec(createTableSql); err != nil {
-		return fmt.Errorf("Cannot instantiate the store: %s", err.Error())
+		return FromError("createSessionTable", err)
 	}
 	return nil
 }
@@ -254,7 +254,7 @@ func (store *MysqlStore) cleanup(stopCleanup <-chan struct{}, cleanupDone chan<-
 		case <-ticker.C:
 			// Delete expired sessions on each tick.
 			if err := store.deleteExpiredSessions(); err != nil {
-				error <- err
+				error <- FromError("MysqlStore.cleanup", errors.Join(ErrFailedToDeleteExpiredSessions, err))
 			}
 		}
 	}
@@ -263,7 +263,7 @@ func (store *MysqlStore) cleanup(stopCleanup <-chan struct{}, cleanupDone chan<-
 func (store *MysqlStore) deleteExpiredSessions() error {
 	deleteQuery := "DELETE FROM " + store.tableName + " WHERE expiresAt < NOW()"
 	if _, err := store.db.Exec(deleteQuery); err != nil {
-		return fmt.Errorf("MysqlStore: Cleanup failed: %s", err.Error())
+		return err
 	}
 	return nil
 }
@@ -304,7 +304,13 @@ func (store *MysqlStore) New(r *http.Request, name string) (*sessions.Session, e
 			err = store.load(session)
 			if err == nil {
 				session.IsNew = false
+			} else if errors.Is(err, sql.ErrNoRows) {
+				err = FromError("MysqlStore.New", errors.Join(ErrNoSessionSaved, err))
+			} else {
+				err = FromError("MysqlStore.New", errors.Join(ErrLoadingSessionDataFromDb, err))
 			}
+		} else {
+			err = FromError("MysqlStore.New", errors.Join(ErrFailedToDecodeCookie, err))
 		}
 	}
 	return session, err
@@ -315,7 +321,7 @@ func (store *MysqlStore) Save(r *http.Request, w http.ResponseWriter, s *session
 	// Delete if max-age is <= 0
 	if s.Options.MaxAge <= 0 {
 		if err := store.delete(s); err != nil {
-			return err
+			return FromError("MysqlStore.Save", errors.Join(ErrFailedToDeleteSession, err))
 		}
 		http.SetCookie(w, sessions.NewCookie(s.Name(), "", s.Options))
 		return nil
@@ -323,15 +329,15 @@ func (store *MysqlStore) Save(r *http.Request, w http.ResponseWriter, s *session
 
 	if s.ID == "" {
 		if err := store.insert(s); err != nil {
-			return err
+			return FromError("MysqlStore.Save", errors.Join(ErrFailedToInsertSession, err))
 		}
 	} else if err := store.update(s); err != nil {
-		return err
+		return FromError("MysqlStore.Save", errors.Join(ErrFailedToUpdateSession, err))
 	}
 	encoded, err := securecookie.EncodeMulti(s.Name(), s.ID,
 		store.Codecs...)
 	if err != nil {
-		return err
+		return FromError("MysqlStore.Save", errors.Join(ErrFailedToDecodeCookie, err))
 	}
 	http.SetCookie(w, sessions.NewCookie(s.Name(), encoded, s.Options))
 	return nil
@@ -346,7 +352,6 @@ func (store *MysqlStore) Delete(r *http.Request, w http.ResponseWriter, session 
 	for k := range session.Values {
 		delete(session.Values, k)
 	}
-
 }
 
 // load makes a query to the db to load the sessions data from the database
@@ -356,16 +361,16 @@ func (store *MysqlStore) load(session *sessions.Session) error {
 	err := row.Scan(&sess.id, &sess.sessionData, &sess.createdAt, &sess.modifiedAt, &sess.expiresAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("MysqlStore: Session with Id: %s not found", session.ID)
+			return FromError("MysqlStore.load", errors.Join(ErrNoSessionSaved, err))
 		}
-		return err
+		return FromError("MysqlStore.load", errors.Join(ErrFailedToLoadSession, err))
 	}
 	if sess.expiresAt.Sub(time.Now()) < 0 {
-		return errors.New("MysqlStore: Session expired!")
+		return FromError("MysqlStore.load", ErrSessionExpired)
 	}
 	err = securecookie.DecodeMulti(session.Name(), sess.sessionData, &session.Values, store.Codecs...)
 	if err != nil {
-		return err
+		return FromError("MysqlStore.load", errors.Join(ErrFailedToDecodeSessionData, err))
 	}
 	session.Values["createdAt"] = sess.createdAt
 	session.Values["modifiedAt"] = sess.modifiedAt
@@ -395,15 +400,15 @@ func (store *MysqlStore) insert(session *sessions.Session) error {
 
 	encoded, err := securecookie.EncodeMulti(session.Name(), session.Values, store.Codecs...)
 	if err != nil {
-		return err
+		return FromError("MysqlStore.insert", errors.Join(ErrFailedToEncodeSessionData, err))
 	}
 	res, err := store.stmtInsert.Exec(encoded, createdAt, modifiedAt, expiresAt)
 	if err != nil {
-		return err
+		return FromError("MysqlStore.insert", errors.Join(ErrFailedToInsertSession, err))
 	}
 	lastInsertedId, err := res.LastInsertId()
 	if err != nil {
-		return err
+		return FromError("MysqlStore.insert", errors.Join(ErrFailedToInsertSession, err))
 	}
 	session.ID = fmt.Sprintf("%d", lastInsertedId)
 	return nil
@@ -438,11 +443,11 @@ func (store *MysqlStore) update(session *sessions.Session) error {
 	delete(session.Values, "modifiedAt")
 	encoded, err := securecookie.EncodeMulti(session.Name(), session.Values, store.Codecs...)
 	if err != nil {
-		return err
+		return FromError("MysqlStore.update", errors.Join(ErrFailedToEncodeSessionData, err))
 	}
 	_, err = store.stmtUpdate.Exec(encoded, createdAt, expiresAt, session.ID)
 	if err != nil {
-		return err
+		return FromError("MysqlStore.update", errors.Join(ErrFailedToUpdateSession, err))
 	}
 	return nil
 }

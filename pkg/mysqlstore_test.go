@@ -3,11 +3,11 @@ package mysqlstore
 import (
 	"database/sql"
 	"encoding/gob"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -251,7 +251,7 @@ func TestStore(t *testing.T) {
 	// Get a session.
 	_, err = store.Get(req, "Session")
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, ErrNoSessionSaved) {
 			return
 		}
 		t.Fatalf("Error getting session: %v", err)
