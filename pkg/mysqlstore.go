@@ -21,6 +21,12 @@ type MysqlStore struct {
 	stmtUpdate *sql.Stmt
 	stmtDelete *sql.Stmt
 
+	shouldCleanup   bool
+	cleanupInterval time.Duration
+	stopCleanup     chan struct{}
+	cleanupDone     chan struct{}
+	cleanupErr      chan error
+
 	Codecs  []securecookie.Codec
 	Options *sessions.Options // default configuration
 }
@@ -56,8 +62,10 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 	}
 
 	store := &MysqlStore{
-		db:        db,
-		tableName: tableName,
+		db:              db,
+		tableName:       tableName,
+		shouldCleanup:   false,
+		cleanupInterval: 0,
 
 		Codecs: securecookie.CodecsFromPairs(parseKeyPairs(keys)...),
 		Options: &sessions.Options{
@@ -82,6 +90,12 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 		return nil, fmt.Errorf("Cannot instantiate the store: %s", err.Error())
 	}
 
+	// Start cleanup goroutine if shouldCleanup is true
+	if store.shouldCleanup {
+		store.stopCleanup, store.cleanupDone, store.cleanupErr = make(chan struct{}), make(chan struct{}), make(chan error)
+		go store.cleanup(store.stopCleanup, store.cleanupDone, store.cleanupErr)
+	}
+
 	return store, nil
 }
 
@@ -100,11 +114,14 @@ func NewMysqlStoreFromDsn(dsn string, tableName string, keys []KeyPair, opts ...
 }
 
 func (store *MysqlStore) Close() {
-	store.db.Close()
-	if store.stmtSelect != nil {store.stmtSelect.Close()}
+	if store.shouldCleanup {
+		store.StopCleanup(store.stopCleanup, store.cleanupDone)
+	}
+	store.stmtSelect.Close()
 	store.stmtUpdate.Close()
 	store.stmtDelete.Close()
 	store.stmtInsert.Close()
+	store.db.Close()
 }
 
 // Sets the path of the cookie
@@ -153,6 +170,14 @@ func WithSecure(secure bool) MysqlStoreOption {
 	}
 }
 
+// Sets the path of the cookie
+func WithCleanupInterval(interval time.Duration) MysqlStoreOption {
+	return func(store *MysqlStore) {
+		store.shouldCleanup = true
+		store.cleanupInterval = interval
+	}
+}
+
 func parseKeyPairs(keys []KeyPair) [][]byte {
 	var keyList [][]byte
 	for _, key := range keys {
@@ -193,7 +218,7 @@ func (store *MysqlStore) prepareQueryStatements() error {
 	return nil
 }
 
-func (store *MysqlStore)createSessionTable() error {
+func (store *MysqlStore) createSessionTable() error {
 	createTableSql := `
 		CREATE TABLE IF NOT EXISTS ` + "`" + store.tableName + "`" + ` (
 			id int(11) NOT NULL AUTO_INCREMENT,
@@ -210,6 +235,42 @@ func (store *MysqlStore)createSessionTable() error {
 	return nil
 }
 
+func (store *MysqlStore) StopCleanup(quit chan<- struct{}, done <-chan struct{}) {
+	quit <- struct{}{}
+	<-done
+}
+
+// The first channel only sends data while the second one only receive data
+func (store *MysqlStore) cleanup(stopCleanup <-chan struct{}, cleanupDone chan<- struct{}, error chan<- error) {
+	ticker := time.NewTicker(store.cleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stopCleanup:
+			// Handle the quit signal.
+			cleanupDone <- struct{}{}
+			return
+		case <-ticker.C:
+			// Delete expired sessions on each tick.
+			if err := store.deleteExpiredSessions(); err != nil {
+				error <- err
+			}
+		}
+	}
+}
+
+func (store *MysqlStore) deleteExpiredSessions() error {
+	deleteQuery := "DELETE FROM " + store.tableName + " WHERE expiresAt < NOW()"
+	if _, err := store.db.Exec(deleteQuery); err != nil {
+		return fmt.Errorf("MysqlStore: Cleanup failed: %s", err.Error())
+	}
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// ----------------- Implementation of the Store interface --------------------
+// ----------------------------------------------------------------------------
 // Get should return a cached session.
 // Get returns a session for the given name after adding it to the registry.
 //
@@ -288,11 +349,27 @@ func (store *MysqlStore) Delete(r *http.Request, w http.ResponseWriter, session 
 
 }
 
-func (store *MysqlStore) delete(session *sessions.Session) error {
-	_, err := store.stmtDelete.Exec(session.ID)
+// load makes a query to the db to load the sessions data from the database
+func (store *MysqlStore) load(session *sessions.Session) error {
+	row := store.stmtSelect.QueryRow(session.ID)
+	sess := sessionTableStructure{}
+	err := row.Scan(&sess.id, &sess.sessionData, &sess.createdAt, &sess.modifiedAt, &sess.expiresAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("MysqlStore: Session with Id: %s not found", session.ID)
+		}
+		return err
+	}
+	if sess.expiresAt.Sub(time.Now()) < 0 {
+		return errors.New("MysqlStore: Session expired!")
+	}
+	err = securecookie.DecodeMulti(session.Name(), sess.sessionData, &session.Values, store.Codecs...)
 	if err != nil {
 		return err
 	}
+	session.Values["createdAt"] = sess.createdAt
+	session.Values["modifiedAt"] = sess.modifiedAt
+	session.Values["expiresAt"] = sess.expiresAt
 	return nil
 }
 
@@ -370,26 +447,10 @@ func (store *MysqlStore) update(session *sessions.Session) error {
 	return nil
 }
 
-// load makes a query to the db to load the sessions data from the database
-func (store *MysqlStore) load(session *sessions.Session) error {
-	row := store.stmtSelect.QueryRow(session.ID)
-	sess := sessionTableStructure{}
-	err := row.Scan(&sess.id, &sess.sessionData, &sess.createdAt, &sess.modifiedAt, &sess.expiresAt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("MysqlStore: Session with Id: %s not found", session.ID)
-		}
-		return err
-	}
-	if sess.expiresAt.Sub(time.Now()) < 0 {
-		return errors.New("MysqlStore: Session expired!")
-	}
-	err = securecookie.DecodeMulti(session.Name(), sess.sessionData, &session.Values, store.Codecs...)
+func (store *MysqlStore) delete(session *sessions.Session) error {
+	_, err := store.stmtDelete.Exec(session.ID)
 	if err != nil {
 		return err
 	}
-	session.Values["createdAt"] = sess.createdAt
-	session.Values["modifiedAt"] = sess.modifiedAt
-	session.Values["expiresAt"] = sess.expiresAt
 	return nil
 }
