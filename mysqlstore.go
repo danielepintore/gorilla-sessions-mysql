@@ -258,9 +258,9 @@ func (store *MysqlStore) createSessionTable() error {
 
 // stopSessionsCleanup is a helper function that allows to stop the cleanup
 // goroutine
-func (store *MysqlStore) stopSessionsCleanup(quit chan<- struct{}, done <-chan struct{}) {
-	quit <- struct{}{}
-	<-done
+func (store *MysqlStore) stopSessionsCleanup(stopCleanup chan<- struct{}, cleanupDone <-chan struct{}) {
+	stopCleanup <- struct{}{}
+	<-cleanupDone
 	store.shouldCleanup = false
 }
 
