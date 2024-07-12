@@ -2,7 +2,6 @@ package mysqlstore
 
 import (
 	"database/sql"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"github.com/gorilla/sessions"
 )
 
+// MysqlStore provides session data from a mysql database
 type MysqlStore struct {
 	db         *sql.DB
 	tableName  string
@@ -31,13 +31,19 @@ type MysqlStore struct {
 	Options *sessions.Options // default configuration
 }
 
+// A [KeyPair] rappresent two keys, an AuthenticationKey used for signing and a
+// optional (can be nil) EncryptionKey for encryption
 type KeyPair struct {
 	AuthenticationKey []byte
 	EncryptionKey     []byte
 }
 
+// A list of MysqlStoreOption can be used when creating a MysqlStore when using
+// [NewMysqlStore] or [NewMysqlStoreFromDsn]
 type MysqlStoreOption func(*MysqlStore)
 
+// sessionTableStructure rappresent the structure of the table used in the
+// database to store sessions
 type sessionTableStructure struct {
 	id          int
 	sessionData string
@@ -46,19 +52,16 @@ type sessionTableStructure struct {
 	expiresAt   time.Time
 }
 
-func init() {
-	gob.Register(time.Time{})
-}
-
-// TODO: in docs remember to advise that parseTime should be enabled
-// Create a new store from a database connection, in order to work correctly
-// you need to ensure that the db connection has the parseTime flag set to true
+// NewMysqlStore creates a new [MysqlStore] that can be used to retrieve and save
+// user sessions from a database.
+// IMPORTANT: When passing the database connection make sure to have the option
+// parseTime set to true, otherwise you may have problems.
 func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlStoreOption) (*MysqlStore, error) {
 	if db == nil {
-		return nil, FromError("NewMysqlStore", ErrDbConnectionIsNil)
+		return nil, fromError("NewMysqlStore", ErrDbConnectionIsNil)
 	}
 	if err := db.Ping(); err != nil {
-		return nil, FromError("NewMysqlStore", errors.Join(ErrDbPing, err))
+		return nil, fromError("NewMysqlStore", errors.Join(ErrDbPing, err))
 	}
 
 	store := &MysqlStore{
@@ -83,11 +86,11 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 	}
 
 	if err := store.createSessionTable(); err != nil {
-		return nil, FromError("NewMysqlStore", errors.Join(ErrAddingSessionTable, err))
+		return nil, fromError("NewMysqlStore", errors.Join(ErrAddingSessionTable, err))
 	}
 
 	if err := store.prepareQueryStatements(); err != nil {
-		return nil, FromError("NewMysqlStore", errors.Join(ErrFailedToPrepareStmt, err))
+		return nil, fromError("NewMysqlStore", errors.Join(ErrFailedToPrepareStmt, err))
 	}
 
 	// Start cleanup goroutine if shouldCleanup is true
@@ -99,23 +102,26 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 	return store, nil
 }
 
-// Creates a new store using a dns string in order to create the database connection
-// It is important that the dsn string has the option parseTime=true in order to
-// enable the driver to convert the colums TIMESTAMP and DATETIME in time.Time
+// NewMysqlStoreFromDsn creates a new [MysqlStore] that can be used to retrieve and save
+// user sessions from a database, it uses a dsn string to create a connection to
+// the database.
+// IMPORTANT: The dsn string should contain the parameter parseTime=true 
+// otherwise you may have problems.
 func NewMysqlStoreFromDsn(dsn string, tableName string, keys []KeyPair, opts ...MysqlStoreOption) (*MysqlStore, error) {
 	if !strings.Contains(dsn, "parseTime=true") {
-		return nil, FromError("NewMysqlStoreFromDsn", ErrNoParseTimeParameter)
+		return nil, fromError("NewMysqlStoreFromDsn", ErrNoParseTimeParameter)
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return nil, FromError("NewMysqlStoreFromDsn", errors.Join(ErrDbOpenConnection, err))
+		return nil, fromError("NewMysqlStoreFromDsn", errors.Join(ErrDbOpenConnection, err))
 	}
 	return NewMysqlStore(db, tableName, keys, opts...)
 }
 
+// Close stop the cleanup goroutine and closes the database connection
 func (store *MysqlStore) Close() {
 	if store.shouldCleanup {
-		store.StopCleanup(store.stopCleanup, store.cleanupDone)
+		store.stopSessionsCleanup(store.stopCleanup, store.cleanupDone)
 	}
 	store.stmtSelect.Close()
 	store.stmtUpdate.Close()
@@ -124,28 +130,32 @@ func (store *MysqlStore) Close() {
 	store.db.Close()
 }
 
-// Sets the path of the cookie
+// WithPath returns a [MysqlStoreOption] that allows to change the path parameter
+// of the session cookie that is provided by default when creating a new session
 func WithPath(path string) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.Options.Path = path
 	}
 }
 
-// Sets httpOnly attribute of the cookie
+// WithHttpOnly returns a [MysqlStoreOption] that allows to change the httpOnly parameter
+// of the session cookie that is provided by default when creating a new session
 func WithHttpOnly(httpOnly bool) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.Options.HttpOnly = httpOnly
 	}
 }
 
-// Sets SameSite attribute of the cookie
+// WithSameSite returns a [MysqlStoreOption] that allows to change the sameSite parameter
+// of the session cookie that is provided by default when creating a new session
 func WithSameSite(sameSite http.SameSite) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.Options.SameSite = sameSite
 	}
 }
 
-// Sets the maxAge of the cookie
+// WithMaxAge returns a [MysqlStoreOption] that allows to change the maxAge parameter
+// of the session cookie that is provided by default when creating a new session
 // MaxAge=0 means no Max-Age attribute specified and the cookie will be
 // deleted after the browser session ends.
 // MaxAge<0 means delete cookie immediately.
@@ -156,21 +166,25 @@ func WithMaxAge(maxAge int) MysqlStoreOption {
 	}
 }
 
-// Sets the domain of the cookie
+// WithDomain returns a [MysqlStoreOption] that allows to change the domain parameter
+// of the session cookie that is provided by default when creating a new session
 func WithDomain(domain string) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.Options.Domain = domain
 	}
 }
 
-// Sets the secure boolean to the cookie
+// WithSecure returns a [MysqlStoreOption] that allows to change the secure parameter
+// of the session cookie that is provided by default when creating a new session
 func WithSecure(secure bool) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.Options.Secure = secure
 	}
 }
 
-// Sets the path of the cookie
+// WithCleanupInterval returns a [MysqlStoreOption] that allows to enable and
+// set the cleanup interval, the cleanup interval is the time between each 
+// scan to remove exipired sessions from the database
 func WithCleanupInterval(interval time.Duration) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.shouldCleanup = true
@@ -178,6 +192,8 @@ func WithCleanupInterval(interval time.Duration) MysqlStoreOption {
 	}
 }
 
+// parseKeyPairs is a helper function used to parse the []KeyPair to a [][]byte
+// that we need to instantiate the Codec
 func parseKeyPairs(keys []KeyPair) [][]byte {
 	var keyList [][]byte
 	for _, key := range keys {
@@ -186,38 +202,43 @@ func parseKeyPairs(keys []KeyPair) [][]byte {
 	return keyList
 }
 
+// prepareQueryStatements prepares the stmt statements that will be used while
+// using the store
 func (store *MysqlStore) prepareQueryStatements() error {
 	var err error
 	selectQuery := "SELECT id, sessionData, createdAt, modifiedAt, expiresAt FROM " +
 		store.tableName + " WHERE id = ?"
 	store.stmtSelect, err = store.db.Prepare(selectQuery)
 	if err != nil {
-		return FromError("prepareQueryStatements->SELECT", err)
+		return fromError("prepareQueryStatements->SELECT", err)
 	}
 
 	insertQuery := "INSERT INTO " + store.tableName +
 		"(id, sessionData, createdAt, modifiedAt, expiresAt) VALUES (NULL, ?, ?, ?, ?)"
 	store.stmtInsert, err = store.db.Prepare(insertQuery)
 	if err != nil {
-		return FromError("prepareQueryStatements->INSERT", err)
+		return fromError("prepareQueryStatements->INSERT", err)
 	}
 
 	deleteQuery := "DELETE FROM " + store.tableName + " WHERE id = ?"
 	store.stmtDelete, err = store.db.Prepare(deleteQuery)
 	if err != nil {
-		return FromError("prepareQueryStatements->DELETE", err)
+		return fromError("prepareQueryStatements->DELETE", err)
 	}
 
 	updateQuery := "UPDATE " + store.tableName +
 		" SET sessionData = ?, createdAt = ?, expiresAt = ? WHERE id = ?"
 	store.stmtUpdate, err = store.db.Prepare(updateQuery)
 	if err != nil {
-		return FromError("prepareQueryStatements->UPDATE", err)
+		return fromError("prepareQueryStatements->UPDATE", err)
 	}
 
 	return nil
 }
 
+// createSessionTable is a helper function used to create the session table
+// (the table where all session data is stored in the database) if it doesn't
+// exist
 func (store *MysqlStore) createSessionTable() error {
 	createTableSql := `
 		CREATE TABLE IF NOT EXISTS ` + "`" + store.tableName + "`" + ` (
@@ -230,16 +251,20 @@ func (store *MysqlStore) createSessionTable() error {
 		);
 	`
 	if _, err := store.db.Exec(createTableSql); err != nil {
-		return FromError("createSessionTable", err)
+		return fromError("createSessionTable", err)
 	}
 	return nil
 }
 
-func (store *MysqlStore) StopCleanup(quit chan<- struct{}, done <-chan struct{}) {
+// stopSessionsCleanup is a helper function that allows to stop the cleanup
+// goroutine
+func (store *MysqlStore) stopSessionsCleanup(quit chan<- struct{}, done <-chan struct{}) {
 	quit <- struct{}{}
 	<-done
+	store.shouldCleanup = false
 }
 
+// cleanup is the goroutine used to remove expired sessions from the database
 // The first channel only sends data while the second one only receive data
 func (store *MysqlStore) cleanup(stopCleanup <-chan struct{}, cleanupDone chan<- struct{}, error chan<- error) {
 	ticker := time.NewTicker(store.cleanupInterval)
@@ -254,12 +279,14 @@ func (store *MysqlStore) cleanup(stopCleanup <-chan struct{}, cleanupDone chan<-
 		case <-ticker.C:
 			// Delete expired sessions on each tick.
 			if err := store.deleteExpiredSessions(); err != nil {
-				error <- FromError("MysqlStore.cleanup", errors.Join(ErrFailedToDeleteExpiredSessions, err))
+				error <- fromError("MysqlStore.cleanup", errors.Join(ErrFailedToDeleteExpiredSessions, err))
 			}
 		}
 	}
 }
 
+// deleteExpiredSessions is a helper function used to delete all expired sessions
+// from the database
 func (store *MysqlStore) deleteExpiredSessions() error {
 	deleteQuery := "DELETE FROM " + store.tableName + " WHERE expiresAt < NOW()"
 	if _, err := store.db.Exec(deleteQuery); err != nil {
@@ -271,6 +298,8 @@ func (store *MysqlStore) deleteExpiredSessions() error {
 // ----------------------------------------------------------------------------
 // ----------------- Implementation of the Store interface --------------------
 // ----------------------------------------------------------------------------
+
+
 // Get should return a cached session.
 // Get returns a session for the given name after adding it to the registry.
 //
@@ -278,7 +307,7 @@ func (store *MysqlStore) deleteExpiredSessions() error {
 // the session to check if it is an existing session or a new one.
 //
 // It returns a new session and an error if the session exists but could
-// not be decoded.
+// not be decoded or is expired.
 func (store *MysqlStore) Get(r *http.Request, name string) (*sessions.Session, error) {
 	return sessions.GetRegistry(r).Get(store, name)
 }
@@ -291,7 +320,7 @@ func (store *MysqlStore) Get(r *http.Request, name string) (*sessions.Session, e
 //
 // The difference between New() and Get() is that calling New() twice will
 // decode the session data twice, while Get() registers and reuses the same
-// decoded session after the first cal
+// decoded session after the first call
 func (store *MysqlStore) New(r *http.Request, name string) (*sessions.Session, error) {
 	session := sessions.NewSession(store, name)
 	opts := *store.Options
@@ -305,23 +334,23 @@ func (store *MysqlStore) New(r *http.Request, name string) (*sessions.Session, e
 			if err == nil {
 				session.IsNew = false
 			} else if errors.Is(err, sql.ErrNoRows) {
-				err = FromError("MysqlStore.New", errors.Join(ErrNoSessionSaved, err))
+				err = fromError("MysqlStore.New", errors.Join(ErrNoSessionSaved, err))
 			} else {
-				err = FromError("MysqlStore.New", errors.Join(ErrLoadingSessionDataFromDb, err))
+				err = fromError("MysqlStore.New", errors.Join(ErrLoadingSessionDataFromDb, err))
 			}
 		} else {
-			err = FromError("MysqlStore.New", errors.Join(ErrFailedToDecodeCookie, err))
+			err = fromError("MysqlStore.New", errors.Join(ErrFailedToDecodeCookie, err))
 		}
 	}
 	return session, err
 }
 
-// Save should persist session to the underlying store implementation.
+// Save stores the session data in the database
 func (store *MysqlStore) Save(r *http.Request, w http.ResponseWriter, s *sessions.Session) error {
 	// Delete if max-age is <= 0
 	if s.Options.MaxAge <= 0 {
 		if err := store.delete(s); err != nil {
-			return FromError("MysqlStore.Save", errors.Join(ErrFailedToDeleteSession, err))
+			return fromError("MysqlStore.Save", errors.Join(ErrFailedToDeleteSession, err))
 		}
 		http.SetCookie(w, sessions.NewCookie(s.Name(), "", s.Options))
 		return nil
@@ -329,20 +358,22 @@ func (store *MysqlStore) Save(r *http.Request, w http.ResponseWriter, s *session
 
 	if s.ID == "" {
 		if err := store.insert(s); err != nil {
-			return FromError("MysqlStore.Save", errors.Join(ErrFailedToInsertSession, err))
+			return fromError("MysqlStore.Save", errors.Join(ErrFailedToInsertSession, err))
 		}
 	} else if err := store.update(s); err != nil {
-		return FromError("MysqlStore.Save", errors.Join(ErrFailedToUpdateSession, err))
+		return fromError("MysqlStore.Save", errors.Join(ErrFailedToUpdateSession, err))
 	}
 	encoded, err := securecookie.EncodeMulti(s.Name(), s.ID,
 		store.Codecs...)
 	if err != nil {
-		return FromError("MysqlStore.Save", errors.Join(ErrFailedToDecodeCookie, err))
+		return fromError("MysqlStore.Save", errors.Join(ErrFailedToDecodeCookie, err))
 	}
 	http.SetCookie(w, sessions.NewCookie(s.Name(), encoded, s.Options))
 	return nil
 }
 
+// Delete change the session options in order that it will be deleted when calling
+// [Save]
 func (store *MysqlStore) Delete(r *http.Request, w http.ResponseWriter, session *sessions.Session) {
 	// Set cookie to expire.
 	options := session.Options
@@ -354,23 +385,24 @@ func (store *MysqlStore) Delete(r *http.Request, w http.ResponseWriter, session 
 	}
 }
 
-// load makes a query to the db to load the sessions data from the database
+// load is a helper function that makes a query to the database to load the data
+// of a session identified by the session.ID
 func (store *MysqlStore) load(session *sessions.Session) error {
 	row := store.stmtSelect.QueryRow(session.ID)
 	sess := sessionTableStructure{}
 	err := row.Scan(&sess.id, &sess.sessionData, &sess.createdAt, &sess.modifiedAt, &sess.expiresAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return FromError("MysqlStore.load", errors.Join(ErrNoSessionSaved, err))
+			return fromError("MysqlStore.load", errors.Join(ErrNoSessionSaved, err))
 		}
-		return FromError("MysqlStore.load", errors.Join(ErrFailedToLoadSession, err))
+		return fromError("MysqlStore.load", errors.Join(ErrFailedToLoadSession, err))
 	}
 	if sess.expiresAt.Sub(time.Now()) < 0 {
-		return FromError("MysqlStore.load", ErrSessionExpired)
+		return fromError("MysqlStore.load", ErrSessionExpired)
 	}
 	err = securecookie.DecodeMulti(session.Name(), sess.sessionData, &session.Values, store.Codecs...)
 	if err != nil {
-		return FromError("MysqlStore.load", errors.Join(ErrFailedToDecodeSessionData, err))
+		return fromError("MysqlStore.load", errors.Join(ErrFailedToDecodeSessionData, err))
 	}
 	session.Values["createdAt"] = sess.createdAt
 	session.Values["modifiedAt"] = sess.modifiedAt
@@ -378,7 +410,7 @@ func (store *MysqlStore) load(session *sessions.Session) error {
 	return nil
 }
 
-// Runs when we add a new session in the store
+// insert is a helper function that is used to add new sessions to the database
 func (store *MysqlStore) insert(session *sessions.Session) error {
 	var createdAt, modifiedAt, expiresAt time.Time
 	sessionCreatedAt := session.Values["createdAt"]
@@ -400,20 +432,22 @@ func (store *MysqlStore) insert(session *sessions.Session) error {
 
 	encoded, err := securecookie.EncodeMulti(session.Name(), session.Values, store.Codecs...)
 	if err != nil {
-		return FromError("MysqlStore.insert", errors.Join(ErrFailedToEncodeSessionData, err))
+		return fromError("MysqlStore.insert", errors.Join(ErrFailedToEncodeSessionData, err))
 	}
 	res, err := store.stmtInsert.Exec(encoded, createdAt, modifiedAt, expiresAt)
 	if err != nil {
-		return FromError("MysqlStore.insert", errors.Join(ErrFailedToInsertSession, err))
+		return fromError("MysqlStore.insert", errors.Join(ErrFailedToInsertSession, err))
 	}
 	lastInsertedId, err := res.LastInsertId()
 	if err != nil {
-		return FromError("MysqlStore.insert", errors.Join(ErrFailedToInsertSession, err))
+		return fromError("MysqlStore.insert", errors.Join(ErrFailedToInsertSession, err))
 	}
 	session.ID = fmt.Sprintf("%d", lastInsertedId)
 	return nil
 }
 
+// update is a helper function used to store the updated session values in the
+// database
 func (store *MysqlStore) update(session *sessions.Session) error {
 	if session.IsNew == true {
 		return store.insert(session)
@@ -443,15 +477,17 @@ func (store *MysqlStore) update(session *sessions.Session) error {
 	delete(session.Values, "modifiedAt")
 	encoded, err := securecookie.EncodeMulti(session.Name(), session.Values, store.Codecs...)
 	if err != nil {
-		return FromError("MysqlStore.update", errors.Join(ErrFailedToEncodeSessionData, err))
+		return fromError("MysqlStore.update", errors.Join(ErrFailedToEncodeSessionData, err))
 	}
 	_, err = store.stmtUpdate.Exec(encoded, createdAt, expiresAt, session.ID)
 	if err != nil {
-		return FromError("MysqlStore.update", errors.Join(ErrFailedToUpdateSession, err))
+		return fromError("MysqlStore.update", errors.Join(ErrFailedToUpdateSession, err))
 	}
 	return nil
 }
 
+// delete is a helper function used to delete a session identified by the
+// session.ID from the database
 func (store *MysqlStore) delete(session *sessions.Session) error {
 	_, err := store.stmtDelete.Exec(session.ID)
 	if err != nil {

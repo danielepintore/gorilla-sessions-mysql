@@ -13,3 +13,7 @@ tests-verbose:
 	-clean
 	go test ./... -p 1 -c -o ${TEST_BINARY}
 	${TEST_BINARY}
+
+docs:
+	-clean
+	godoc -http=:6060

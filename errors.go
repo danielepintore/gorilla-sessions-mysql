@@ -6,6 +6,7 @@ import (
 )
 
 // Error definitions
+// This is a list of errors that can be returned by the store
 var (
 	ErrAddingSessionTable            = errors.New("There was an error while trying to add the session table to the database.")
 	ErrDbConnectionIsNil             = errors.New("The connection struct is nil!")
@@ -27,25 +28,27 @@ var (
 	ErrSessionExpired                = errors.New("The session is expired.")
 )
 
+// MySqlStoreError provides a custom wrapper for encapsulating the function name
+// with a error
 type MySqlStoreError struct {
 	funcName string
 	err      error
 }
 
-// Implement the Error interface
+// Error Implement the Error interface, it return a string like this:
+//
+// funcName: errorMessage
 func (e MySqlStoreError) Error() string {
 	return fmt.Sprintf("%s: %s", e.funcName, e.err.Error())
 }
 
 // Implement the Unwrap interface
+// Unwrap implement the Unwrap interface, used to unwrape error after a errors.Join
 func (e MySqlStoreError) Unwrap() error {
 	return e.err
 }
 
-func NewMysqlStoreError(funcName string, err error) error {
-	return MySqlStoreError{funcName: funcName, err: err}
-}
-
-func FromError(funcName string, err error) error {
+// fromError creates a new MySqlStoreError from an exsiting error
+func fromError(funcName string, err error) error {
 	return MySqlStoreError{funcName: funcName, err: err}
 }
