@@ -5,8 +5,9 @@ import (
 	"fmt"
 )
 
-// Error definitions
-// This is a list of errors that can be returned by the store
+// Error definitions.
+//
+// This is a list of errors that can be returned by the store.
 var (
 	ErrAddingSessionTable            = errors.New("There was an error while trying to add the session table to the database.")
 	ErrDbConnectionIsNil             = errors.New("The connection struct is nil!")
