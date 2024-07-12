@@ -5,6 +5,13 @@
 // Package mysqlstore provides a store implementation for gorilla/sessions that
 // store data in a mysql database
 //
+// # Installation
+//
+// You can install this package by running: 
+//	go get github.com/danielepintore/gorilla-sessions-mysql
+//
+// # Usage
+//
 // To get a store you just need a [sql.DB] struct or a dsn string, you need to
 // specify the TableName, that is the name of the table where your sessions will
 // be saved in the database. You can put even a TableName that doesn't exist, the
