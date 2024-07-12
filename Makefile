@@ -17,3 +17,6 @@ tests-verbose:
 docs:
 	-clean
 	godoc -http=:6060
+
+copyright:
+	python3 scripts/check_copyright.py
