@@ -84,6 +84,9 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 		},
 	}
 
+	// set maxAge for the codecs
+	store.SetMaxAge(store.Options.MaxAge)
+
 	// Apply store options
 	for _, opt := range opts {
 		opt(store)
@@ -109,7 +112,7 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 // NewMysqlStoreFromDsn creates a new [MysqlStore] that can be used to retrieve and save
 // user sessions from a database, it uses a dsn string to create a connection to
 // the database.
-// IMPORTANT: The dsn string should contain the parameter parseTime=true 
+// IMPORTANT: The dsn string should contain the parameter parseTime=true
 // otherwise you may have problems.
 func NewMysqlStoreFromDsn(dsn string, tableName string, keys []KeyPair, opts ...MysqlStoreOption) (*MysqlStore, error) {
 	if !strings.Contains(dsn, "parseTime=true") {
@@ -166,8 +169,20 @@ func WithSameSite(sameSite http.SameSite) MysqlStoreOption {
 // MaxAge>0 means Max-Age attribute present and given in seconds.
 func WithMaxAge(maxAge int) MysqlStoreOption {
 	return func(store *MysqlStore) {
-		store.Options.MaxAge = maxAge
+		store.SetMaxAge(maxAge)
 	}
+}
+
+// SetMaxAge sets the maxAge parameter for the cookie
+func (store *MysqlStore)SetMaxAge(maxAge int) {
+		store.Options.MaxAge = maxAge
+
+		// Set the maxAge for each securecookie instance.
+		for _, codec := range store.Codecs {
+			if sc, ok := codec.(*securecookie.SecureCookie); ok {
+				sc.MaxAge(maxAge)
+			}
+		}
 }
 
 // WithDomain returns a [MysqlStoreOption] that allows to change the domain parameter
@@ -187,7 +202,7 @@ func WithSecure(secure bool) MysqlStoreOption {
 }
 
 // WithCleanupInterval returns a [MysqlStoreOption] that allows to enable and
-// set the cleanup interval, the cleanup interval is the time between each 
+// set the cleanup interval, the cleanup interval is the time between each
 // scan to remove exipired sessions from the database
 func WithCleanupInterval(interval time.Duration) MysqlStoreOption {
 	return func(store *MysqlStore) {
@@ -302,7 +317,6 @@ func (store *MysqlStore) deleteExpiredSessions() error {
 // ----------------------------------------------------------------------------
 // ----------------- Implementation of the Store interface --------------------
 // ----------------------------------------------------------------------------
-
 
 // Get should return a cached session.
 // Get returns a session for the given name after adding it to the registry.
