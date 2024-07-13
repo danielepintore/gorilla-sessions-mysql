@@ -81,6 +81,7 @@ func NewMysqlStore(db *sql.DB, tableName string, keys []KeyPair, opts ...MysqlSt
 			SameSite: http.SameSiteNoneMode,
 			Secure:   true,
 			HttpOnly: true,
+			Partitioned: false,
 		},
 	}
 
@@ -208,6 +209,14 @@ func WithCleanupInterval(interval time.Duration) MysqlStoreOption {
 	return func(store *MysqlStore) {
 		store.shouldCleanup = true
 		store.cleanupInterval = interval
+	}
+}
+
+// WithPartitioned returns a [MysqlStoreOption] that allows to enable or disable
+// the the Partitioned attribute in a cookie
+func WithPartitioned(isPartitioned bool) MysqlStoreOption {
+	return func(store *MysqlStore) {
+		store.Partitioned = isPartitioned
 	}
 }
 
