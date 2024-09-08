@@ -216,7 +216,7 @@ func WithCleanupInterval(interval time.Duration) MysqlStoreOption {
 // the the Partitioned attribute in a cookie
 func WithPartitioned(isPartitioned bool) MysqlStoreOption {
 	return func(store *MysqlStore) {
-		store.Partitioned = isPartitioned
+		store.Options.Partitioned = isPartitioned
 	}
 }
 
